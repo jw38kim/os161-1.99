@@ -21,8 +21,16 @@
 /*
  * replace this with declarations of any synchronization and other variables you need here
  */
-static struct semaphore *intersectionSem;
 
+static struct lock *intersectionOrderLock;
+static struct cv *cv_origins[4];
+
+static volatile unsigned int origin_order[4];
+static volatile bool origin_exists[4];
+static volatile unsigned int car_counts[4];
+static volatile unsigned int curr_cars = 0;
+static volatile unsigned int curr = 0;
+static volatile unsigned int next = 1;
 
 /* 
  * The simulation driver will call this function once before starting
@@ -36,11 +44,21 @@ intersection_sync_init(void)
 {
   /* replace this default implementation with your own implementation */
 
-  intersectionSem = sem_create("intersectionSem",1);
-  if (intersectionSem == NULL) {
-    panic("could not create intersection semaphore");
+  intersectionOrderLock = lock_create("intersectionOrderLock");
+  if (intersectionOrderLock == NULL) {
+    panic("could not create intersection order lock");
   }
-  return;
+
+  for (int i = 0; i < 4; i++){
+    cv_origins[i] = cv_create("cv");
+    if (cv_origins[i] == NULL) {
+      panic("could not create a condition variable");
+    }
+
+    origin_order[i] = 11;
+    origin_exists[i] = false;
+    car_counts[i] = 0;
+  }
 }
 
 /* 
@@ -54,8 +72,12 @@ void
 intersection_sync_cleanup(void)
 {
   /* replace this default implementation with your own implementation */
-  KASSERT(intersectionSem != NULL);
-  sem_destroy(intersectionSem);
+  KASSERT(intersectionOrderLock != NULL);
+  lock_destroy(intersectionOrderLock);
+  for (int i = 0; i < 4; i++){
+    KASSERT(cv_origins[i]!= NULL);
+    cv_destroy(cv_origins[i]);
+  }
 }
 
 
@@ -76,10 +98,25 @@ void
 intersection_before_entry(Direction origin, Direction destination) 
 {
   /* replace this default implementation with your own implementation */
-  (void)origin;  /* avoid compiler complaint about unused parameter */
-  (void)destination; /* avoid compiler complaint about unused parameter */
-  KASSERT(intersectionSem != NULL);
-  P(intersectionSem);
+  (void)destination;
+
+  lock_acquire(intersectionOrderLock);
+
+  if(curr_cars > 0){
+
+    if(!origin_exists[origin]){
+      origin_order[next%4] = origin;
+      next++;
+      origin_exists[origin] = true;
+    }
+    car_counts[origin]++;
+    cv_wait(cv_origins[origin], intersectionOrderLock);
+
+  } else {
+    curr_cars++;
+  }
+
+  lock_release(intersectionOrderLock);
 }
 
 
@@ -97,9 +134,28 @@ intersection_before_entry(Direction origin, Direction destination)
 void
 intersection_after_exit(Direction origin, Direction destination) 
 {
-  /* replace this default implementation with your own implementation */
-  (void)origin;  /* avoid compiler complaint about unused parameter */
-  (void)destination; /* avoid compiler complaint about unused parameter */
-  KASSERT(intersectionSem != NULL);
-  V(intersectionSem);
+  /* replace this default implementation witfh your own implementation */
+  (void)origin;
+  (void)destination;
+
+  lock_acquire(intersectionOrderLock);
+
+  curr_cars--;
+
+  if(curr_cars == 0){
+    /* this is the last thread from the batch; reset + broadcast */
+    if(origin_order[(curr+1)%4] != 11){
+      curr++;
+      int curr_origin = origin_order[curr%4];
+      origin_order[curr%4] = 11;
+      origin_exists[curr_origin] = false;
+      
+      curr_cars = car_counts[curr_origin];
+      car_counts[curr_origin] = 0;
+
+      cv_broadcast(cv_origins[curr_origin], intersectionOrderLock);
+    }
+  }
+
+  lock_release(intersectionOrderLock);
 }
